@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcap-insight"
+version = "0.1.0"
+description = "A small command-line PCAP analyzer: summary stats, protocol breakdown, top talkers/ports, and heuristic suspicious-pattern flags."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "pcap-insight contributors" }]
+keywords = ["pcap", "pcapng", "scapy", "network-analysis", "security"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = [
+    "scapy>=2.5.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+pcap-insight = "pcap_insight.cli:main"
+
+[tool.setuptools]
+packages = ["pcap_insight"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

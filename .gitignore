@@ -1,0 +1,12 @@
+﻿pcap-files/
+*.pcap
+*.pcapng
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+.vscode/
+.pytest_cache/
