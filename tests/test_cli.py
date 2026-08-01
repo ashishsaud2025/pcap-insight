@@ -15,8 +15,8 @@ from pcap_insight.cli import main
 
 def run_cli(*argv: str) -> tuple[int, str]:
     """Run main() capturing stdout+stderr, converting sys.exit to a code."""
-    import io
     import contextlib
+    import io
 
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -47,6 +47,16 @@ class TestCliTables:
         ):
             assert section in out, f"missing section: {section}"
 
+    def test_talker_tables_show_org_columns(self, capture_path: str) -> None:
+        """Enrichment is on by default, so the Org columns are populated."""
+        code, out = run_cli(capture_path)
+        assert code == 0
+        # The synthetic capture is all RFC1918 + one public IP, so the org
+        # column must show at least "Private" somewhere.
+        assert "Source Org" in out
+        assert "Dest Org" in out
+        assert "Private" in out
+
     def test_missing_file_errors(self) -> None:
         code, out = run_cli("does-not-exist.pcap")
         assert code == 2
@@ -71,6 +81,10 @@ class TestCliJson:
         assert len(data["suspicious_findings"]) >= 4
         types = {f["type"] for f in data["suspicious_findings"]}
         assert "plaintext-credentials" in types
+
+        # Every talker row carries the org/ASN annotation fields.
+        for row in data["top_talkers_by_packets"] + data["top_talkers_by_bytes"]:
+            assert set(row) >= {"src", "dst", "src_org", "dst_org"}
 
     def test_summary_time_fields_consistent(self, capture_path: str, capsys: pytest.CaptureFixture) -> None:
         code = main([capture_path, "--export", "json"])
@@ -106,6 +120,78 @@ class TestCliJson:
         assert data["summary"]["total_packets"] < 27
         by_proto = {p["protocol"]: p["count"] for p in data["protocols"]}
         assert by_proto.get("UDP", 0) == 0
+
+
+class TestCliEnrichment:
+    def test_enrichment_on_by_default_marks_private_ips(
+        self, capture_path: str, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Without --no-enrich the org annotations are populated (Private locally)."""
+        code = main([capture_path, "--export", "json"])
+        assert code == 0
+        data: dict[str, Any] = json.loads(capsys.readouterr().out)
+
+        all_rows = data["top_talkers_by_packets"] + data["top_talkers_by_bytes"]
+        assert all_rows
+        for row in all_rows:
+            assert isinstance(row["src_org"], str)
+            assert isinstance(row["dst_org"], str)
+        # Every talker in the synthetic capture involves at least one RFC1918
+        # host, which must be labeled "Private" without touching a database.
+        rows_with_private_src = [r for r in all_rows if r["src"].startswith("10.")]
+        assert rows_with_private_src
+        assert all(r["src_org"] == "Private" for r in rows_with_private_src)
+
+    def test_no_enrich_leaves_org_fields_null(
+        self, capture_path: str, capsys: pytest.CaptureFixture
+    ) -> None:
+        """--no-enrich disables the lookup entirely; fields are null in JSON."""
+        code = main([capture_path, "--no-enrich", "--export", "json"])
+        assert code == 0
+        data: dict[str, Any] = json.loads(capsys.readouterr().out)
+
+        all_rows = data["top_talkers_by_packets"] + data["top_talkers_by_bytes"]
+        assert all_rows
+        assert all(r["src_org"] is None and r["dst_org"] is None for r in all_rows)
+
+    def test_missing_geoip_db_emits_stderr_warning(
+        self, capture_path: str, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a GeoLite2-ASN database the CLI warns (instead of silently 'Unknown')."""
+        import pcap_insight.enrichment as enrichment
+
+        # Force the "database not found" backend state.
+        monkeypatch.setattr(enrichment, "_default_db_paths", lambda: [])
+        enrichment._reader = None
+        enrichment._reader_error = None
+
+        code = main([capture_path, "--export", "json"])
+        assert code == 0
+        captured = capsys.readouterr()
+
+        assert "warning: enrichment enabled but GeoLite2-ASN" in captured.err
+        assert "--no-enrich" in captured.err
+        # Public IPs resolve to "Unknown" without a database (not an error).
+        data = json.loads(captured.out)
+        assert data["summary"]["total_packets"] > 0
+
+    def test_no_enrich_silences_stderr_warning(
+        self, capture_path: str, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--no-enrich skips the backend check entirely, so no warning is emitted."""
+        import pcap_insight.enrichment as enrichment
+
+        monkeypatch.setattr(enrichment, "_default_db_paths", lambda: [])
+        enrichment._reader = None
+        enrichment._reader_error = None
+
+        code = main([capture_path, "--no-enrich", "--export", "json"])
+        assert code == 0
+        captured = capsys.readouterr()
+
+        assert "warning: enrichment enabled" not in captured.err
+        data = json.loads(captured.out)
+        assert data["summary"]["total_packets"] > 0
 
 
 class TestCliDemo:

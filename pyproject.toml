@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcap-insight"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small command-line PCAP analyzer: summary stats, protocol breakdown, top talkers/ports, and heuristic suspicious-pattern flags."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "scapy>=2.5.0",
     "rich>=13.0",
+    "geoip2>=4.0",
 ]
 
 [project.optional-dependencies]

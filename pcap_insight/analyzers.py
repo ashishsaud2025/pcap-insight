@@ -12,7 +12,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import socket
 
@@ -95,6 +95,8 @@ class TalkerStat:
     src: str
     dst: str
     value: int  # packet count, or bytes
+    src_org: Optional[str] = None  # organization/ASN label for src, if enriched
+    dst_org: Optional[str] = None  # organization/ASN label for dst, if enriched
 
 
 @dataclass
@@ -134,8 +136,16 @@ class AnalysisResult:
 
 
 # Summary
-def summarize(records: Iterable[PacketRecord]) -> AnalysisResult:
-    """Compute the summary + all sections from a list of packet records."""
+def summarize(
+    records: Iterable[PacketRecord],
+    org_lookup: Optional[Callable[[str], str]] = None,
+) -> AnalysisResult:
+    """Compute the summary + all sections from a list of packet records.
+
+    ``org_lookup`` is an optional IP -> organization-label callback used to
+    enrich top-talker rows with the owning organization/ASN. It is injected
+    rather than imported so this module stays free of network/database I/O.
+    """
     recs = list(records)
     result = AnalysisResult()
     result.total_packets = len(recs)
@@ -151,8 +161,8 @@ def summarize(records: Iterable[PacketRecord]) -> AnalysisResult:
         result.duration_seconds = result.end_time - result.start_time
 
     result.protocols = protocol_breakdown(recs)
-    result.top_talkers_by_count = top_talkers(recs, by_bytes=False)
-    result.top_talkers_by_bytes = top_talkers(recs, by_bytes=True)
+    result.top_talkers_by_count = top_talkers(recs, by_bytes=False, org_lookup=org_lookup)
+    result.top_talkers_by_bytes = top_talkers(recs, by_bytes=True, org_lookup=org_lookup)
     result.top_ports = top_ports(recs)
     result.findings = detect_suspicious(recs)
     return result
@@ -174,15 +184,39 @@ def protocol_breakdown(records: Iterable[PacketRecord]) -> list[ProtocolStat]:
     return stats
 
 
-def top_talkers(records: Iterable[PacketRecord], by_bytes: bool = False, limit: int = 10) -> list[TalkerStat]:
-    """Top ``limit`` source/destination IP pairs by packet count or byte volume."""
+def top_talkers(
+    records: Iterable[PacketRecord],
+    by_bytes: bool = False,
+    limit: int = 10,
+    org_lookup: Optional[Callable[[str], str]] = None,
+) -> list[TalkerStat]:
+    """Top ``limit`` source/destination IP pairs by packet count or byte volume.
+
+    When ``org_lookup`` is provided, each row is annotated with the owning
+    organization/ASN for both IPs (best-effort; never raises).
+    """
     totals: Counter[tuple[str, str]] = Counter()
     for rec in records:
         if rec.src_ip is None or rec.dst_ip is None:
             continue
         key = (rec.src_ip, rec.dst_ip)
         totals[key] += rec.length if by_bytes else 1
-    return [TalkerStat(src=s, dst=d, value=v) for (s, d), v in totals.most_common(limit)]
+
+    stats: list[TalkerStat] = []
+    for (s, d), v in totals.most_common(limit):
+        if org_lookup is None:
+            stats.append(TalkerStat(src=s, dst=d, value=v))
+        else:
+            stats.append(
+                TalkerStat(
+                    src=s,
+                    dst=d,
+                    value=v,
+                    src_org=org_lookup(s),
+                    dst_org=org_lookup(d),
+                )
+            )
+    return stats
 
 
 def top_ports(records: Iterable[PacketRecord], limit: int = 10) -> list[PortStat]:
@@ -529,11 +563,23 @@ def analysis_result_to_dict(result: AnalysisResult) -> dict[str, object]:
             for p in result.protocols
         ],
         "top_talkers_by_packets": [
-            {"src": t.src, "dst": t.dst, "packets": t.value}
+            {
+                "src": t.src,
+                "dst": t.dst,
+                "src_org": t.src_org,
+                "dst_org": t.dst_org,
+                "packets": t.value,
+            }
             for t in result.top_talkers_by_count
         ],
         "top_talkers_by_bytes": [
-            {"src": t.src, "dst": t.dst, "bytes": t.value}
+            {
+                "src": t.src,
+                "dst": t.dst,
+                "src_org": t.src_org,
+                "dst_org": t.dst_org,
+                "bytes": t.value,
+            }
             for t in result.top_talkers_by_bytes
         ],
         "top_ports": [

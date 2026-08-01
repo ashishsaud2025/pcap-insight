@@ -66,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="BPF-style capture filter, e.g. 'tcp port 443' or 'host 10.0.0.5'",
     )
     parser.add_argument(
+        "--no-enrich",
+        action="store_true",
+        help=(
+            "disable ASN/organization enrichment for top-talker tables "
+            "(default: on, using the GeoLite2-ASN database if present)"
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -178,15 +186,21 @@ def render_report(result: AnalysisResult) -> None:
     _print_section(console, "Top talkers by packet count")
     _make_table(
         console,
-        ["Source", "Destination", "Packets"],
-        [[t.src, t.dst, str(t.value)] for t in result.top_talkers_by_count],
+        ["Source", "Source Org", "Destination", "Dest Org", "Packets"],
+        [
+            [t.src, t.src_org or "-", t.dst, t.dst_org or "-", str(t.value)]
+            for t in result.top_talkers_by_count
+        ],
     )
 
     _print_section(console, "Top talkers by byte volume")
     _make_table(
         console,
-        ["Source", "Destination", "Bytes"],
-        [[t.src, t.dst, _fmt_bytes(t.value)] for t in result.top_talkers_by_bytes],
+        ["Source", "Source Org", "Destination", "Dest Org", "Bytes"],
+        [
+            [t.src, t.src_org or "-", t.dst, t.dst_org or "-", _fmt_bytes(t.value)]
+            for t in result.top_talkers_by_bytes
+        ],
     )
 
     _print_section(console, "Top destination ports")
@@ -250,7 +264,43 @@ def main(argv: Optional[list[str]] = None) -> int:
     except ValueError as exc:
         _error(str(exc))
 
-    result = summarize(records)
+    # Enrichment is on by default. The lookup is injected (rather than imported
+    # into analyzers.py) so the analysis layer stays free of database I/O, and
+    # so --no-enrich runs with zero overhead in truly offline environments.
+    org_lookup = None
+    if not args.no_enrich:
+        from .enrichment import (
+            backend_status,
+            ensure_backend_initialized,
+            lookup_org,
+        )
+
+        # Emit a hint when the backend can't resolve orgs so "Unknown" labels
+        # don't look like a bug. Initialized eagerly so the warning appears
+        # even when every IP in the capture turns out to be private.
+        ensure_backend_initialized()
+        status = backend_status()
+        if status == "db-not-found":
+            sys.stderr.write(
+                "pcap-insight: warning: enrichment enabled but GeoLite2-ASN "
+                "database not found; public IPs will show 'Unknown' (see README "
+                "'Optional: organization/ASN enrichment' to install it, or use "
+                "--no-enrich to silence this warning)\n"
+            )
+        elif status == "geoip2-package-missing":
+            sys.stderr.write(
+                "pcap-insight: warning: geoip2 package is not installed; "
+                "enrichment disabled (public IPs will show 'Unknown')\n"
+            )
+        elif status == "db-error":
+            sys.stderr.write(
+                "pcap-insight: warning: GeoLite2-ASN database could not be "
+                "read; enrichment disabled (public IPs will show 'Unknown')\n"
+            )
+
+        org_lookup = lookup_org
+
+    result = summarize(records, org_lookup=org_lookup)
 
     if args.export == "json":
         json.dump(analysis_result_to_dict(result), sys.stdout, indent=2)

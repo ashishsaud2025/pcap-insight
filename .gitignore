@@ -11,3 +11,5 @@ build/
 .vscode/
 .pytest_cache/
 todo.md
+*.mmdb
+database/

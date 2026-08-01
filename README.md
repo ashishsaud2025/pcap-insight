@@ -7,6 +7,8 @@ readable security-and-traffic report:
 - **Protocol breakdown**: TCP/UDP/ICMP/ARP/DNS/TLS/HTTP counts and percentages
 - **Top talkers**: top 10 source-to-destination IP pairs by packet count *and* by byte volume
 - **Top ports**: most-used destination ports with best-effort service names
+- **ASN/organization enrichment**: top-talker rows annotated with the owning
+  organization/ASN (offline via MaxMind's free GeoLite2-ASN database; disable with `--no-enrich`)
 - **Suspicious patterns** (flags, not blocks):
   - plaintext credentials over HTTP
   - high-volume unanswered SYN bursts (possible SYN scan)
@@ -15,8 +17,10 @@ readable security-and-traffic report:
 - **`--export json`**: machine-readable output for piping into other tools
 - **`--filter`**: a BPF-style filter to narrow analysis to specific traffic
 
-It uses [Scapy](https://scapy.net/) to parse captures and
-[Rich](https://github.com/Textualize/rich) to render tables. Everything else is
+It uses [Scapy](https://scapy.net/) to parse captures,
+[Rich](https://github.com/Textualize/rich) to render tables, and
+[geoip2](https://geoip2.readthedocs.io/) with MaxMind's free GeoLite2-ASN
+database for optional offline organization/ASN attribution. Everything else is
 standard-library Python (argparse, `socket.getservbyport`, `ipaddress`, ...).
 
 > **What this is not.** `pcap-insight` is a triage/teaching tool. The
@@ -30,7 +34,7 @@ standard-library Python (argparse, `socket.getservbyport`, `ipaddress`, ...).
 
 ## Installation
 
-Requires **Python 3.9+**.
+Requires **Python 3.10+**.
 
 ### 1. Clone the repository
 
@@ -81,9 +85,9 @@ pip install -r requirements.txt
 ```bash
 python -m pip install -e .
 ```
-This installs the `pcap-insight` console entry point, plus `scapy` and `rich`
-as declared in `pyproject.toml`. The `-e` (editable) flag means any local code
-changes take effect immediately without reinstalling.
+This installs the `pcap-insight` console entry point, plus `scapy`, `rich`,
+and `geoip2` as declared in `pyproject.toml`. The `-e` (editable) flag means
+any local code changes take effect immediately without reinstalling.
 
 For development (adds `pytest` for the test suite):
 ```bash
@@ -102,6 +106,43 @@ from any directory *as long as this venv is activated* — reactivate it with
 the `Activate.ps1` / `activate.bat` / `source ... activate` command above each
 time you open a new terminal session.
 
+### Optional: organization/ASN enrichment (GeoLite2-ASN)
+
+Top-talker tables are annotated with the owning organization/ASN for each IP.
+The lookup is **fully offline** and uses MaxMind's free **GeoLite2-ASN**
+database, i.e.  no API key and no network access are needed at analysis time.
+
+To enable real org names (instead of `Unknown`) for public IPs:
+
+1. Sign up at <https://www.maxmind.com/en/geolite2/signup> and download the
+   **GeoLite2-ASN** database (`GeoLite2-ASN.mmdb`).
+2. Place it in any of these locations (checked in order):
+   - `<project>/GeoLite2-ASN.mmdb`
+   - `~/.pcap-insight/GeoLite2-ASN.mmdb`
+   - `~/.local/share/GeoLite2-ASN.mmdb`
+   - or set the `PCAP_INSIGHT_ASN_DB` environment variable to its path
+
+Private/reserved addresses (RFC1918, loopback, link-local, multicast, ...) are
+labeled `Private` and never touch the database. A missing or unreadable
+database, or an unknown IP, is labeled `Unknown`. Results are cached per IP for
+the lifetime of the process, so top-talker enrichment adds only one database
+read per unique public IP. Use `pcap-insight capture.pcap --no-enrich` to skip
+the lookup entirely (useful fully-offline or in scripts that don't need it).
+
+One edge case is handled explicitly: IPv4-mapped IPv6 addresses
+(`::ffff:a.b.c.d`) are decoded back to their embedded IPv4 address before the
+private check, because Python marks the mapped form `reserved=True` even when
+the embedded address is public. Without the decode, `::ffff:8.8.8.8` would be
+(incorrectly) treated as private and never reach the database. 6to4 (`2002::/16`)
+and Teredo (`2001::/32`) ranges are labeled `Private` per Python's stdlib
+classification even though they can embed public IPv4 addresses -- an accepted
+stdlib quirk (see `is_private()` in `pcap_insight/enrichment.py`).
+
+If enrichment is enabled but the database cannot be found or read, the CLI
+prints a warning to **stderr** (so JSON/piped output stays clean) explaining
+that public IPs will show `Unknown`, along with a pointer to this section.
+`--no-enrich` disables both the lookup and the warning.
+
 ### Windows / Npcap note
 
 Scapy only needs the **Npcap** driver if you want to *sniff* live traffic.
@@ -114,7 +155,7 @@ installation are required.
 
 ```
 usage: pcap-insight [-h] [--demo] [--export {json}] [--filter FILTER]
-                    [--version]
+                    [--no-enrich] [--version]
                     [capture]
 
 Analyze a .pcap/.pcapng capture: summary stats, protocol breakdown, top
@@ -129,6 +170,8 @@ options:
   --demo           write a synthetic demo capture to './demo.pcap' and analyze it
   --export {json}  emit a structured JSON document instead of tables
   --filter FILTER  BPF-style capture filter, e.g. 'tcp port 443' or 'host 10.0.0.5'
+  --no-enrich      disable ASN/organization enrichment for top-talker tables
+                   (default: on, using the GeoLite2-ASN database if present)
   --version        show program's version number and exit
 ```
 
@@ -153,6 +196,9 @@ pcap-insight capture.pcap --filter 'host 10.0.0.5'
 
 # Narrow to HTTPS and dump JSON for jq
 pcap-insight capture.pcap --filter 'tcp port 443' --export json | jq .summary
+
+# Skip org/ASN lookup (offline environments, scripting, faster runs)
+pcap-insight capture.pcap --no-enrich
 ```
 
 ### Sample output
@@ -180,24 +226,24 @@ Protocol breakdown
  ICMP      1        3.7%
 
 Top talkers by packet count
- Source         Destination    Packets
- 10.0.0.50      10.0.0.1       15
- 10.0.0.2       93.184.216.34  2
- 10.0.0.2       8.8.8.8        2
- 10.0.0.60      10.0.0.61      2
- 93.184.216.34  10.0.0.2       1
- 10.0.0.61      10.0.0.60      1
- 10.0.0.2       10.0.0.99      1
+ Source         Source Org  Destination    Dest Org  Packets
+ 10.0.0.50      Private     10.0.0.1       Private   15
+ 10.0.0.2       Private     93.184.216.34  Unknown   2
+ 10.0.0.2       Private     8.8.8.8        Unknown   2
+ 10.0.0.60      Private     10.0.0.61      Private   2
+ 93.184.216.34  Unknown     10.0.0.2       Private   1
+ 10.0.0.61      Private     10.0.0.60      Private   1
+ 10.0.0.2       Private     10.0.0.99      Private   1
 
 Top talkers by byte volume
- Source         Destination    Bytes
- 10.0.0.50      10.0.0.1       600 B
- 10.0.0.2       93.184.216.34  262 B
- 10.0.0.2       8.8.8.8        143 B
- 10.0.0.60      10.0.0.61      80 B
- 93.184.216.34  10.0.0.2       63 B
- 10.0.0.61      10.0.0.60      40 B
- 10.0.0.2       10.0.0.99      28 B
+ Source         Source Org  Destination    Dest Org  Bytes
+ 10.0.0.50      Private     10.0.0.1       Private   600 B
+ 10.0.0.2       Private     93.184.216.34  Unknown   262 B
+ 10.0.0.2       Private     8.8.8.8        Unknown   143 B
+ 10.0.0.60      Private     10.0.0.61      Private   80 B
+ 93.184.216.34  Unknown     10.0.0.2       Private   63 B
+ 10.0.0.61      Private     10.0.0.60      Private   40 B
+ 10.0.0.2       Private     10.0.0.99      Private   28 B
 
 Top destination ports
  Port   Service  Packets
@@ -251,10 +297,10 @@ pcap-insight capture.pcap --export json > report.json
     {"protocol": "ICMP", "count": 1, "percent": 3.7}
   ],
   "top_talkers_by_packets": [
-    {"src": "10.0.0.50", "dst": "10.0.0.1", "packets": 15}
+    {"src": "10.0.0.50", "dst": "10.0.0.1", "src_org": "Private", "dst_org": "Private", "packets": 15}
   ],
   "top_talkers_by_bytes": [
-    {"src": "10.0.0.50", "dst": "10.0.0.1", "bytes": 600}
+    {"src": "10.0.0.50", "dst": "10.0.0.1", "src_org": "Private", "dst_org": "Private", "bytes": 600}
   ],
   "top_ports": [
     {"port": 80, "count": 3, "service": "http"}
@@ -439,7 +485,7 @@ python -m pip install -e ".[dev]"
 python -m pytest -v
 ```
 
-The suite (51 tests) covers:
+The suite (78 tests) covers:
 
 - Shannon-entropy correctness against the reference formula and known strings
 - protocol counting / percentages / sort order
@@ -447,6 +493,7 @@ The suite (51 tests) covers:
 - each suspicious-pattern detector: hit cases, clean cases, and boundary cases
 - the BPF filter engine (parsing, qualifiers, combinators, invalid filters)
 - end-to-end CLI tables, JSON export, JSON + filter, and `--demo`
+- enrichment behavior (private-IP short-circuit, cache, failure handling)
 - parsing of the synthetic `tests/` fixture capture (Scapy-generated in a
   session fixture; no external pcap files)
 
@@ -459,12 +506,14 @@ pcap-insight/
     parser.py       # Scapy reading -> PacketRecord, plus the BPF-subset engine
     analyzers.py    # stats + four heuristic detectors (pure, testable)
     cli.py          # argparse, rich rendering, JSON export
+    enrichment.py   # offline GeoLite2-ASN org lookup (cache + private detection)
     testing.py      # synthetic capture builder (used by tests and --demo)
   tests/
     conftest.py     # session fixtures (creates the synthetic capture)
     test_analyzers.py
     test_filter.py
     test_cli.py
+    test_enrichment.py
   README.md
   requirements.txt
   pyproject.toml    # pip-installable, console script: pcap-insight
@@ -474,9 +523,10 @@ pcap-insight/
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - `scapy` ≥ 2.5
 - `rich` ≥ 13
+- `geoip2` ≥ 4 (used for optional org/ASN enrichment)
 - `pytest` ≥ 8 (dev only)
 
 See `requirements.txt` for pinned minimums.
