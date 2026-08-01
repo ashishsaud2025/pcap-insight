@@ -1,4 +1,6 @@
-# PCAP ANALYZER CLI 
+# pcap-insight 
+
+[![Tests](https://github.com/ashishsaud2025/pcap-insight/actions/workflows/test.yml/badge.svg)](https://github.com/ashishsaud2025/pcap-insight/actions/workflows/test.yml)
 
 A command-line PCAP analyzer that turns a `.pcap` / `.pcapng` capture into a
 readable security-and-traffic report:
